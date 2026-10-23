@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=SnesRev Launcher
+Exec=snesrev-launcher
+Terminal=false
+Type=Application
+Icon=snesrev
+Comment=Zelda 3, Super Metroid and Super Mario World PC ports
+Categories=Game;
+StartupWMClass=snesrev
+StartupNotify=false
