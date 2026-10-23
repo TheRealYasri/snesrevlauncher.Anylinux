@@ -63,7 +63,7 @@ mkdir -p ./AppDir/bin ./AppDir/share/snesrev/tools/zelda3
 mkdir -p ./AppDir/share/snesrev/tools/smw/other ./AppDir/share/snesrev/tools/sm
 mkdir -p ./AppDir/share/snesrev/icons ./AppDir/share/snesrev/patches
 
-LAUNCHER_DIR=$SCRIPT_DIR/useful-tools/demo/snesrev-launcher
+LAUNCHER_DIR="$SCRIPT_DIR/build files"
 
 cp "$LAUNCHER_DIR/snesrev-launcher" ./AppDir/bin/snesrev-launcher
 chmod +x ./AppDir/bin/snesrev-launcher
@@ -76,12 +76,8 @@ done
 
 # Redux is a romhack of the base games, so these patches let the launcher build
 # those ROMs for people who only own the originals.
-wget --retry-connrefused --tries=30 \
-    "https://raw.githubusercontent.com/TheRealYasri/snesrev-launcher/2364f51d3d3f9bebd3bde416a33f2e0840181345/snesrev.AppDir/z3.redux.ips" \
-    -O ./AppDir/share/snesrev/patches/z3.redux.ips
-wget --retry-connrefused --tries=30 \
-    "https://raw.githubusercontent.com/TheRealYasri/snesrev-launcher/2364f51d3d3f9bebd3bde416a33f2e0840181345/snesrev.AppDir/sm.redux.ips" \
-    -O ./AppDir/share/snesrev/patches/sm.redux.ips
+cp "$LAUNCHER_DIR"/z3.redux.ips ./AppDir/share/snesrev/patches/z3.redux.ips
+cp "$LAUNCHER_DIR"/sm.redux.ips ./AppDir/share/snesrev/patches/sm.redux.ips
 
 # zelda3: restool.py chdirs into assets/, reads the ROM from the directory
 # above it and writes zelda3_assets.dat there.
