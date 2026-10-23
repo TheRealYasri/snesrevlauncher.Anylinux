@@ -274,22 +274,26 @@ smw_assets() {
 smb_roms() {
 	[ -n "${SMAS_ROM:-}" ] || { say "the Super Mario All-Stars ROM is required for this game"; return 1; }
 
-	say "Extracting Super Mario Bros. and The Lost Levels from All-Stars"
-	w=$(make_workdir smw) || return 1
-	# extract.py opens ../smas.sfc and the two zstd dictionaries next to itself
-	cp -f "$SMAS_ROM" "$w/smas.sfc" || { rm -rf "$w"; return 1; }
+    say "Extracting Super Mario Bros. and The Lost Levels from All-Stars"
+    w=$(make_workdir smw) || return 1
+    # extract.py opens smas.sfc and both zstd dictionaries from the current
+    # directory and writes the two ROMs there as well, so it has to run from
+    # the workdir root with the dictionaries copied next to it, not from the
+    # directory the script happens to live in
+    cp -f "$SMAS_ROM" "$w/smas.sfc" || { rm -rf "$w"; return 1; }
+    cp -f "$w/other/smb1.zst" "$w/other/smbll.zst" "$w/" || { rm -rf "$w"; return 1; }
 
-	( cd "$w/other" && "$APPDIR/bin/python3" extract.py ) || { rm -rf "$w"; say "Extraction failed"; return 1; }
+    ( cd "$w" && "$APPDIR/bin/python3" other/extract.py ) || { rm -rf "$w"; say "Extraction failed"; return 1; }
 
-	if [ ! -f "$w/other/smb1.sfc" ] || [ ! -f "$w/other/smbll.sfc" ]; then
-		rm -rf "$w"
-		say "Extraction produced no ROMs"
-		return 1
-	fi
+    if [ ! -f "$w/smb1.sfc" ] || [ ! -f "$w/smbll.sfc" ]; then
+        rm -rf "$w"
+        say "Extraction produced no ROMs"
+        return 1
+    fi
 
-	mv -f "$w/other/smb1.sfc" "$ROM_DIR/smb1.sfc" || { rm -rf "$w"; return 1; }
-	mv -f "$w/other/smbll.sfc" "$ROM_DIR/smbll.sfc" || { rm -rf "$w"; return 1; }
-	rm -rf "$w"
+    mv -f "$w/smb1.sfc" "$ROM_DIR/smb1.sfc" || { rm -rf "$w"; return 1; }
+    mv -f "$w/smbll.sfc" "$ROM_DIR/smbll.sfc" || { rm -rf "$w"; return 1; }
+    rm -rf "$w"
 
 	rom_cache_set SMB1 "$ROM_DIR/smb1.sfc" "$(stat -c %Y "$ROM_DIR/smb1.sfc")"
 	rom_cache_set SMBLL "$ROM_DIR/smbll.sfc" "$(stat -c %Y "$ROM_DIR/smbll.sfc")"
