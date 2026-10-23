@@ -3,22 +3,50 @@
 set -eu
 
 ARCH=$(uname -m)
-VERSION=$(pacman -Q PACKAGENAME | awk '{print $2; exit}') # example command to get version of application here
+VERSION=$(cat ~/version)
 export ARCH VERSION
 export OUTPATH=./dist
+export OUTNAME=SnesRev_Launcher-"$ARCH".AppImage
 export ADD_HOOKS="self-updater.hook"
 export UPINFO="gh-releases-zsync|${GITHUB_REPOSITORY%/*}|${GITHUB_REPOSITORY#*/}|latest|*$ARCH.AppImage.zsync"
-export ICON=PATH_OR_URL_TO_ICON
-export DESKTOP=PATH_OR_URL_TO_DESKTOP_ENTRY
+export ICON=https://raw.githubusercontent.com/TheRealYasri/snesrev-launcher/2364f51d3d3f9bebd3bde416a33f2e0840181345/snesrev.AppDir/snesrev.png
+export DESKTOP="$PWD/build files/snesrev.desktop"
+export STARTUPWMCLASS=snesrev
 
-# Deploy dependencies
-quick-sharun /PATH/TO/BINARY_AND_LIBRARIES_HERE
+# The launcher drives the ports through python, and flips applies the Redux
+# patches.
+export DEPLOY_PYTHON=1
+export DEPLOY_SDL=1
+export DEPLOY_OPENGL=1
 
-# Additional changes can be done in between here
+# Only the ports need to be traced for dlopened libraries, the launcher itself
+# would just open its game picker and sit there.
+export STRACE_BINARY="zelda3 sm smw"
 
-# Turn AppDir into AppImage
+# The asset tools are python scripts that import PyYAML, Pillow and zstandard.
+# Their python files come along with the python directory quick-sharun deploys,
+# but the C extensions and the libraries those link against have to be passed
+# explicitly.
+set -- \
+    ./AppDir/bin/snesrev-launcher \
+    ./AppDir/bin/zelda3          \
+    ./AppDir/bin/sm              \
+    ./AppDir/bin/sm-redux        \
+    ./AppDir/bin/smw             \
+    ./AppDir/bin/flips           \
+    /usr/bin/zenity
+
+for f in /usr/lib/python*/site-packages/yaml/_yaml*.so \
+         /usr/lib/python*/site-packages/PIL/_imaging*.so \
+         /usr/lib/python*/site-packages/zstandard/*.so; do
+    [ -f "$f" ] || continue
+    set -- "$@" "$f"
+done
+
+quick-sharun "$@"
+
 quick-sharun --make-appimage
 
-# Test the app for 12 seconds, if the test fails due to the app
-# having issues running in the CI use --simple-test instead
-quick-sharun --test ./dist/*.AppImage
+# The ports need a ROM to start, so only the launcher's own help output can be
+# tested here.
+quick-sharun --simple-test ./dist/*.AppImage help
