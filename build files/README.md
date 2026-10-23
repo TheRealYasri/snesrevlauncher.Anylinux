@@ -6,7 +6,7 @@ launcher, built the same way as every other AppImage in this repository.
 
 The upstream launcher is a shell script wrapped around prebuilt port binaries
 in an AppDir. Here the ports are compiled from source during the build, the
-launcher script is written from scratch as plain POSIX sh (no bashisms, no 
+launcher script is written from scratch as plain POSIX sh (no bashisms, no
 `jq`, no `pip` at runtime) and the AppDir layout follows what `quick-sharun`
 produces.
 
@@ -16,12 +16,6 @@ game assets on first launch with the ports' own python tools.
 
 ## Build
 
-`useful-tools/demo/snesrev-launcher-appimage.sh`, run from the repository root
-the same way as the other demos:
-
-```sh
-sh ./useful-tools/demo/snesrev-launcher-appimage.sh
-```
 It is registered for `x86_64` only: nothing about the ports is architecture
 specific, but that is the only architecture it has been built and run on so far.
 
@@ -31,7 +25,8 @@ picker), assembles `AppDir/share/snesrev` with the asset tools and the Redux
 patches, then hands everything to `quick-sharun`.
 
 ## Layout inside the AppImage
-```sh
+
+```
 bin/snesrev-launcher        the launcher
 bin/zelda3                  zelda3
 bin/sm, bin/sm-redux        super metroid, and the Redux hack of it
