@@ -1,0 +1,709 @@
+#!/bin/sh
+
+# Launcher for the SNES reverse engineering PC ports:
+# Zelda 3, Super Metroid, Super Mario World, plus their romhacks.
+#
+# ROMs are never shipped. The user drops their own dumps next to the AppImage,
+# they are identified by sha1, renamed and cached. Game assets are extracted
+# from those ROMs on first launch with the ports' own python tools.
+#
+# Everything the launcher writes lives in three directories next to the
+# AppImage: srl-roms (the user's dumps), srl-config (per game config + assets)
+# and srl-saves (per game save files). If that location is not writable (for
+# example the AppImage lives in /usr/bin) it falls back to $XDG_DATA_HOME.
+
+set -u
+
+GAME_TABLE='z3|Zelda 3 (US)
+z3-redux|Zelda 3 Redux
+sm|Super Metroid
+sm-redux|Super Metroid Redux
+smw|Super Mario World
+smb1|Super Mario Bros.
+smbll|The Lost Levels
+z3-de|Zelda 3 (German)
+z3-fr|Zelda 3 (French)
+z3-fr-c|Zelda 3 (French Can)
+z3-es|Zelda 3 (Spanish)
+z3-pl|Zelda 3 (Polish)
+z3-pt|Zelda 3 (Portuguese)
+z3-nl|Zelda 3 (Dutch)
+z3-sv|Zelda 3 (Swedish)'
+
+HASH_Z3_US=6D4F10A8B10E10DBE624CB23CF03B88BB8252973
+HASH_Z3_REDUX=B2A07A59E64C498BC1B2F28728F9BF4014C8D582
+HASH_Z3_DE=2E62494967FB0AFDF5DA1635607F9641DF7C6559
+HASH_Z3_FR=229364A1B92A05167CD38609B1AA98F7041987CC
+HASH_Z3_FRC=C1C6C7F76FFF936C534FF11F87A54162FC0AA100
+HASH_Z3_ES=461FCBD700D1332009C0E85A7A136E2A8E4B111E
+HASH_Z3_PL=3C4D605EEFDA1D76F101965138F238476655B11D
+HASH_Z3_PT=D0D09ED41F9C373FE6AFDCCAFBF0DA8C88D3D90D
+HASH_Z3_NL=FA8ADFDBA2697C9A54D583A1284A22AC764C7637
+HASH_Z3_SV=43CD3438469B2C3FE879EA2F410B3EF3CB3F1CA4
+
+HASH_SM=da957f0d63d14cb441d215462904c4fa8519c613
+HASH_SM_REDUX=0F4133F2E6BDD275B0CEEC3E348E2D6BF1C8189E
+
+HASH_SMW="553CF42F35ACF63028A369608742BB5B913C103F|6B47BB75D16514B6A476AA0C73A683A2A4C18765"
+HASH_SMAS=C05817C5B7DF2FBFE631563E0B37237156A8F6B6
+HASH_SMB1=4A5278150F3395419D68CB02A42F7C3C62CDF8B4
+HASH_SMBLL=493E14812AF7A92D0EACF00BA8BB6D3A266302CA
+
+say() { printf '>> %s\n' "$*" >&2; }
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- locations
+
+if [ -z "${APPDIR:-}" ]; then
+	APPDIR=$(cd "$(dirname "$0")/.." && pwd) || exit 1
+fi
+TOOLS=$APPDIR/share/snesrev
+SELF=${APPIMAGE:-$APPDIR/AppRun}
+
+# Where the AppImage lives is where the user expects to drop ROMs.
+if [ -n "${APPIMAGE:-}" ]; then
+	DATA_ROOT=$(dirname "$(readlink -f "$APPIMAGE")")
+else
+	DATA_ROOT=$(dirname "$(readlink -f "$APPDIR")")
+fi
+
+if ! mkdir -p "$DATA_ROOT/srl-roms" 2>/dev/null || [ ! -w "$DATA_ROOT" ]; then
+	DATA_ROOT=${XDG_DATA_HOME:-$HOME/.local/share}/snesrev-launcher
+	say "Install location is read-only, using $DATA_ROOT instead"
+	mkdir -p "$DATA_ROOT/srl-roms" || die "cannot create $DATA_ROOT"
+fi
+
+ROM_DIR=$DATA_ROOT/srl-roms
+CFG_ROOT=$DATA_ROOT/srl-config
+SAVE_ROOT=$DATA_ROOT/srl-saves
+RUN_ROOT=$DATA_ROOT/srl-run
+CFG_FILE=$CFG_ROOT/srl.ini
+
+mkdir -p "$CFG_ROOT/icons" "$SAVE_ROOT" "$RUN_ROOT" || die "cannot create $DATA_ROOT"
+
+# ------------------------------------------------------------------ config
+
+# shellcheck disable=SC1090 # user config, not shipped in the AppImage
+[ -f "$CFG_FILE" ] && . "$CFG_FILE"
+
+set_cfg() {
+	[ -f "$CFG_FILE" ] || : > "$CFG_FILE"
+	grep -v "^$1=" "$CFG_FILE" > "$CFG_FILE.tmp" 2>/dev/null || :
+	mv -f "$CFG_FILE.tmp" "$CFG_FILE"
+	printf '%s="%s"\n' "$1" "$2" >> "$CFG_FILE"
+}
+
+INSTALL_DESKTOP=${INSTALL_DESKTOP:-0}
+LAST_PATH=${LAST_PATH:-}
+REFRESH_DESKTOP=${REFRESH_DESKTOP:-0}
+
+if [ "$DATA_ROOT" != "$LAST_PATH" ]; then
+	say "Data directory: $DATA_ROOT"
+	set_cfg LAST_PATH "$DATA_ROOT"
+	set_cfg REFRESH_DESKTOP 1
+	LAST_PATH=$DATA_ROOT
+	REFRESH_DESKTOP=1
+fi
+
+get_cfg() {
+	eval "printf '%s\n' \"\${$1:-}\""
+}
+
+# Keep the shortcut icons in sync with the ones shipped in the AppImage so the
+# .desktop files can point at a stable path even when the AppImage moves.
+sync_icons() {
+	for i in z3 sm smw; do
+		src=$TOOLS/icons/$i.png
+		dst=$CFG_ROOT/icons/$i.png
+		[ -f "$src" ] || continue
+		[ -f "$dst" ] && [ "$(stat -c %Y "$src")" = "$(get_cfg "CACHE_ICON_${i}_TIME")" ] && continue
+		cp -f "$src" "$dst" || continue
+		set_cfg "CACHE_ICON_${i}_TIME" "$(stat -c %Y "$src")"
+	done
+}
+
+sync_icons
+
+# ------------------------------------------------------------- rom finding
+# sha1 of a file, using the host tool when there is one and the bundled python
+# otherwise, so this works on a system that has neither
+sha1_of() {
+	if [ -n "$HASHER" ]; then
+		"$HASHER" "$1" | awk '{print $1}'
+	else
+		"$APPDIR/bin/python3" -c 'import hashlib,sys
+print(hashlib.sha1(open(sys.argv[1], "rb").read()).hexdigest())' "$1"
+	fi
+}
+
+if command -v sha1sum >/dev/null 2>&1; then
+	HASHER=sha1sum
+elif command -v shasum >/dev/null 2>&1; then
+	HASHER=shasum
+else
+	HASHER=
+fi
+
+rom_cache_set() {
+	set_cfg "CACHE_$1_PATH" "$2"
+	set_cfg "CACHE_$1_TIME" "$3"
+}
+
+# find_rom <sha1|sha1|..> <canonical name> <cache key>
+# Prints the path of the matching dump, renaming it to <canonical name> in
+# $ROM_DIR so the rest of the launcher has a predictable file to work with.
+find_rom() {
+	hashes=$1
+	name=$2
+	key=$3
+
+	cached=$(get_cfg "CACHE_${key}_PATH")
+	if [ -n "$cached" ] && [ -f "$cached" ] &&
+		[ "$(stat -c %Y "$cached" 2>/dev/null)" = "$(get_cfg "CACHE_${key}_TIME")" ]; then
+		printf '%s\n' "$cached"
+		return 0
+	fi
+
+	if [ -f "$ROM_DIR/$name" ] &&
+		sha1_of "$ROM_DIR/$name" | grep -iqE "^($hashes)"; then
+		rom_cache_set "$key" "$ROM_DIR/$name" "$(stat -c %Y "$ROM_DIR/$name")"
+		printf '%s\n' "$ROM_DIR/$name"
+		return 0
+	fi
+
+	for f in "$DATA_ROOT"/*.sfc "$DATA_ROOT"/*.smc "$ROM_DIR"/*.sfc "$ROM_DIR"/*.smc; do
+		[ -f "$f" ] || continue
+		[ "$f" = "$ROM_DIR/$name" ] && continue
+		sha1_of "$f" | grep -iqE "^($hashes)" || continue
+		say "Found $(basename "$f"), moving it to $ROM_DIR/$name"
+		mv -f "$f" "$ROM_DIR/$name" || continue
+		rom_cache_set "$key" "$ROM_DIR/$name" "$(stat -c %Y "$ROM_DIR/$name")"
+		printf '%s\n' "$ROM_DIR/$name"
+		return 0
+	done
+
+	return 0
+}
+
+# ----------------------------------------------------------- asset helpers
+
+# make_workdir <port dir under share/snesrev/tools> -> temp dir holding a
+# writable copy of that port's asset tools
+make_workdir() {
+	w=$(mktemp -d "${TMPDIR:-/tmp}/snesrev-$1.XXXXXX") || return 1
+	cp -R "$TOOLS/tools/$1/." "$w/" || { rm -rf "$w"; return 1; }
+	printf '%s\n' "$w"
+}
+
+# zelda3_assets <game key> <language> [translation rom]
+# Builds $CFG_ROOT/<key>/zelda3_assets.dat. Every Zelda variant shares the US
+# ROM; translations and Redux only replace the dialogue set baked into the
+# assets file, which is why they get their own .dat.
+zelda3_assets() {
+	key=$1
+	lang=$2
+	trans=${3:-}
+	dest=$CFG_ROOT/$key
+
+	[ -f "$dest/zelda3_assets.dat" ] && return 0
+	[ -n "${Z3_ROM:-}" ] || { say "the Zelda 3 (US) ROM is required to build the assets"; return 1; }
+
+	say "Extracting Zelda 3 assets for '$key' (this only happens once)"
+	w=$(make_workdir zelda3) || return 1
+	# restool.py chdirs into assets/, which is where the dialogue and font
+	# files it generates go, while the ROMs it reads and the .dat it writes
+	# sit one level above
+	cp -f "$Z3_ROM" "$w/zelda3.sfc" || { rm -rf "$w"; return 1; }
+	if [ -n "$trans" ]; then
+		cp -f "$trans" "$w/translate.sfc" || { rm -rf "$w"; return 1; }
+	fi
+
+	(
+		cd "$w" || exit 1
+		"$APPDIR/bin/python3" assets/restool.py --extract-from-rom || exit 1
+		if [ "$lang" != us ]; then
+			"$APPDIR/bin/python3" assets/restool.py --extract-dialogue -r translate.sfc || exit 1
+			"$APPDIR/bin/python3" assets/restool.py --languages="$lang" || exit 1
+		fi
+	) || { rm -rf "$w"; say "Asset extraction failed"; return 1; }
+
+	if [ ! -f "$w/zelda3_assets.dat" ]; then
+		rm -rf "$w"
+		say "Asset extraction produced no zelda3_assets.dat"
+		return 1
+	fi
+
+	mkdir -p "$dest" || { rm -rf "$w"; return 1; }
+sh
+	mv -f "$w/zelda3_assets.dat" "$dest/zelda3_assets.dat" || { rm -rf "$w"; return 1; }
+	rm -rf "$w"
+	return 0
+}
+# smw_assets <game key> <rom to extract from>
+# Super Mario World, SMB1 and The Lost Levels all run on the smw executable and
+# all need smw_assets.dat, so the Super Mario World ROM is the one extracted.
+smw_assets() {
+    key=$1
+    rom=$2
+    dest=$CFG_ROOT/$key
+
+    [ -f "$dest/smw_assets.dat" ] && return 0
+    [ -n "$rom" ] || { say "the Super Mario World ROM is required to build the assets"; return 1; }
+
+    say "Extracting Super Mario World assets for '$key' (this only happens once)"
+    w=$(make_workdir smw) || return 1
+    cp -f "$rom" "$w/assets/smw.sfc" || { rm -rf "$w"; return 1; }
+
+    ( cd "$w" && "$APPDIR/bin/python3" assets/restool.py --extract-from-rom -r smw.sfc ) || {
+        rm -rf "$w"; say "Asset extraction failed"; return 1
+    }
+
+    if [ ! -f "$w/smw_assets.dat" ]; then
+        rm -rf "$w"
+        say "Asset extraction produced no smw_assets.dat"
+        return 1
+    fi
+
+    mkdir -p "$dest" || { rm -rf "$w"; return 1; }
+    mv -f "$w/smw_assets.dat" "$dest/smw_assets.dat" || { rm -rf "$w"; return 1; }
+    rm -rf "$w"
+    return 0
+}
+
+# smb_roms: Super Mario Bros. and The Lost Levels are carved out of the Super
+# Mario All-Stars ROM with the dictionary shipped in the smw source tree.
+smb_roms() {
+    [ -n "${SMAS_ROM:-}" ] || { say "the Super Mario All-Stars ROM is required for this game"; return 1; }
+
+    say "Extracting Super Mario Bros. and The Lost Levels from All-Stars"
+    w=$(make_workdir smw) || return 1
+    # extract.py opens ../smas.sfc and the two zstd dictionaries next to itself
+    cp -f "$SMAS_ROM" "$w/smas.sfc" || { rm -rf "$w"; return 1; }
+
+    ( cd "$w/other" && "$APPDIR/bin/python3" extract.py ) || { rm -rf "$w"; say "Extraction failed"; return 1; }
+
+    if [ ! -f "$w/other/smb1.sfc" ] || [ ! -f "$w/other/smbll.sfc" ]; then
+        rm -rf "$w"
+        say "Extraction produced no ROMs"
+        return 1
+    fi
+
+    mv -f "$w/other/smb1.sfc" "$ROM_DIR/smb1.sfc" || { rm -rf "$w"; return 1; }
+    mv -f "$w/other/smbll.sfc" "$ROM_DIR/smbll.sfc" || { rm -rf "$w"; return 1; }
+    rm -rf "$w"
+
+    rom_cache_set SMB1 "$ROM_DIR/smb1.sfc" "$(stat -c %Y "$ROM_DIR/smb1.sfc")"
+    rom_cache_set SMBLL "$ROM_DIR/smbll.sfc" "$(stat -c %Y "$ROM_DIR/smbll.sfc")"
+    return 0
+}
+
+# ------------------------------------------------------------- game running
+
+ensure_ini() {
+    # $1 game key, $2 ini name, $3 default ini shipped in the AppImage
+    mkdir -p "$CFG_ROOT/$1" || return 1
+    [ -f "$CFG_ROOT/$1/$2" ] || cp -f "$3" "$CFG_ROOT/$1/$2" || return 1
+}
+
+# run_game <game key> <binary in $APPDIR/bin> <ini name> <rom link name> <rom path> [rom arg]
+# Every game gets its own working directory holding symlinks to that game's
+# config, assets, ROM and saves, and the port is started inside it, because the
+# ports resolve all of their files relative to the current directory.
+run_game() {
+    key=$1
+    bin=$2
+    ini=$3
+    romname=$4
+    rom=$5
+    romarg=${6:-}
+
+    cfg=$CFG_ROOT/$key
+    saves=$SAVE_ROOT/$key
+    run=$RUN_ROOT/$key
+
+    mkdir -p "$cfg" "$saves" || return 1
+    rm -rf "$run"
+    mkdir -p "$run" || return 1
+
+    ln -sfn "$saves" "$run/saves"
+    [ -f "$cfg/$ini" ] && ln -sfn "$cfg/$ini" "$run/$ini"
+    [ -f "$cfg/zelda3_assets.dat" ] && ln -sfn "$cfg/zelda3_assets.dat" "$run/zelda3_assets.dat"
+    [ -f "$cfg/smw_assets.dat" ] && ln -sfn "$cfg/smw_assets.dat" "$run/smw_assets.dat"
+    [ -n "$rom" ] && ln -sfn "$rom" "$run/$romname"
+
+    say "Starting $key (config: $cfg, saves: $saves)"
+    if [ -n "$romarg" ]; then
+        ( cd "$run" && exec "$APPDIR/bin/$bin" "$romarg" )
+    else
+        ( cd "$run" && exec "$APPDIR/bin/$bin" )
+    fi
+}
+
+# zelda3 <game key> <language> [translation rom]
+zelda3() {
+    key=$1
+    lang=$2
+    trans=${3:-}
+
+    [ -n "${Z3_ROM:-}" ] || die "no Zelda 3 (US) ROM found, drop one next to the AppImage"
+    if [ "$lang" != us ] && [ "$lang" != redux ] && [ -z "$trans" ]; then
+        die "no $lang translation ROM found, $key needs both the US and the $lang dump"
+    fi
+    zelda3_assets "$key" "$lang" "$trans" || exit 1
+
+    ensure_ini "$key" zelda3.ini "$TOOLS/tools/zelda3/zelda3.ini" || exit 1
+    if [ "$lang" != us ]; then
+        sed -i -e 's/^# *Language/Language/' \
+               -e "s/^Language *=.*/Language = $lang/" "$CFG_ROOT/$key/zelda3.ini"
+    fi
+
+    # the assets file already carries the dialogue and the graphics, the ROM is
+    # only the fallback the port uses when it has to build them itself
+    run_game "$key" zelda3 zelda3.ini zelda3.sfc "$Z3_ROM" || exit 1
+}
+
+super_metroid() {
+    key=$1
+    rom=$2
+
+    [ -n "$rom" ] || die "no ROM found for $key, drop one next to the AppImage"
+    ensure_ini "$key" sm.ini "$TOOLS/tools/sm/sm.ini" || exit 1
+
+    run_game "$key" "$key" sm.ini sm.smc "$rom" sm.smc || exit 1
+}
+
+super_mario_world() {
+    key=$1
+    rom=$2
+    romname=$3
+
+    [ -n "$rom" ] || die "no ROM found for $key, drop one next to the AppImage"
+    [ -n "${SMW_ROM:-}" ] || die "no Super Mario World ROM found, it is needed for the assets"
+
+    smw_assets "$key" "$SMW_ROM" || exit 1
+    ensure_ini "$key" smw.ini "$TOOLS/tools/smw/smw.ini" || exit 1
+
+    run_game "$key" smw smw.ini "$romname" "$rom" "$romname" || exit 1
+}
+
+# --------------------------------------------------------- desktop entries
+
+desktop_dir=${XDG_DATA_HOME:-$HOME/.local/share}/applications
+
+desktop_icon() {
+    case $1 in
+        z3*)         echo "$CFG_ROOT/icons/z3.png" ;;
+        sm|sm-redux) echo "$CFG_ROOT/icons/sm.png" ;;
+        *)           echo "$CFG_ROOT/icons/smw.png" ;;
+    esac
+}
+
+install_desktop() {
+    key=$1
+    title=$2
+    mkdir -p "$desktop_dir" || return 1
+
+    icon=$(desktop_icon "$key")
+    [ -f "$icon" ] || icon=utilities-terminal
+
+    say "Writing shortcut: $title"
+    cat > "$desktop_dir/SRL-$title.desktop" <<-EOF
+    [Desktop Entry]
+    Type=Application
+    Name=SRL-$title
+    Exec="$SELF" $key
+    Path=$DATA_ROOT
+    Icon=$icon
+    Terminal=false
+    Categories=Game;
+    StartupNotify=false
+    EOF
+    chmod +x "$desktop_dir/SRL-$title.desktop"
+}
+
+remove_all_desktops() {
+    for f in "$desktop_dir"/SRL-*.desktop; do
+        [ -e "$f" ] || continue
+        rm -f "$f"
+    done
+    say "All desktop shortcuts removed"
+}
+sync_desktops() {
+    for key in $PLAYABLE; do
+        while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            [ "${entry%%|*}" = "$key" ] || continue
+            file=$desktop_dir/SRL-${entry#*|}.desktop
+            if [ "$REFRESH_DESKTOP" = 1 ] || [ ! -f "$file" ]; then
+                install_desktop "$key" "${entry#*|}"
+            fi
+        done <<-EOF
+        $GAME_TABLE
+        EOF
+    done
+
+    # drop shortcuts of games whose files went missing
+    for f in "$desktop_dir"/SRL-*.desktop; do
+        [ -e "$f" ] || continue
+        name=${f##*/SRL-}
+        name=${name%.desktop}
+        found=0
+        for key in $PLAYABLE; do
+            while IFS= read -r entry; do
+                [ "${entry#*|}" = "$name" ] && found=1
+            done <<-EOF
+            $GAME_TABLE
+            EOF
+        done
+        [ "$found" = 1 ] && continue
+        say "Removing obsolete shortcut: $name"
+        rm -f "$f"
+    done
+
+    [ "$REFRESH_DESKTOP" = 1 ] && set_cfg REFRESH_DESKTOP 0
+    return 0
+}
+
+toggle_desktop() {
+    if [ "$INSTALL_DESKTOP" = 1 ]; then
+        INSTALL_DESKTOP=0
+        remove_all_desktops
+        state=Disabled
+    else
+        INSTALL_DESKTOP=1
+        REFRESH_DESKTOP=1
+        sync_desktops
+        state=Enabled
+    fi
+    set_cfg INSTALL_DESKTOP "$INSTALL_DESKTOP"
+    say "Desktop shortcuts: $state"
+    if [ "${GUI:-}" = 1 ] && command -v zenity >/dev/null 2>&1; then
+        zenity --info --text="Desktop shortcuts: $state" --timeout=2
+        exec "$0"
+    fi
+}
+    if [ "${GUI:-}" = 1 ] && command -v zenity >/dev/null 2>&1; then
+        zenity --info --text="Desktop shortcuts: $state" --timeout=2
+        exec "$0"
+    fi
+}
+
+# -------------------------------------------------------------------- help
+
+show_help() {
+    state=Disabled
+    [ "$INSTALL_DESKTOP" = 1 ] && state=Enabled
+
+    cat <<-EOF
+    -------------------------------------------------------
+     SNESREV Command Line Launcher
+    -------------------------------------------------------
+     Usage: ./snesrev-launcher.AppImage [command]
+
+     Configuration:
+      desktop    Toggle Desktop Shortcuts ($state)
+      help       Show this message
+
+     Base Game Commands:
+      z3         Zelda 3 (US)      $HASH_Z3_US
+      z3-redux   (Redux)           $HASH_Z3_REDUX
+      sm         Super Metroid     $HASH_SM
+      sm-redux   SM Redux          $HASH_SM_REDUX
+      smw        Super Mario World $HASH_SMW
+      smb1       Super Mario Bros. $HASH_SMB1
+      smbll      The Lost Levels   $HASH_SMBLL
+      smas       (Extraction Src)  $HASH_SMAS
+
+     Zelda Commands (Requires US ROM + Lang ROM):
+      z3-de      (German)          $HASH_Z3_DE
+      z3-fr      (French)          $HASH_Z3_FR
+      z3-fr-c    (French Can.)     $HASH_Z3_FRC
+      z3-es      (Spanish)         $HASH_Z3_ES
+      z3-pl      (Polish)          $HASH_Z3_PL
+      z3-pt      (Portuguese)      $HASH_Z3_PT
+      z3-nl      (Dutch)           $HASH_Z3_NL
+      z3-sv      (Swedish)         $HASH_Z3_SV
+
+     Drop your own ROM dumps next to the AppImage, they are identified by
+     sha1. No ROM is ever downloaded or shipped.
+
+     Files written by the launcher: $DATA_ROOT
+    -------------------------------------------------------
+    EOF
+}
+
+# --------------------------------------------------------------- discovery
+
+say "Scanning for ROMs in $DATA_ROOT"
+
+Z3_ROM=$(find_rom "$HASH_Z3_US" zelda3.sfc Z3)
+Z3_REDUX_ROM=$(find_rom "$HASH_Z3_REDUX" zelda3.redux.sfc Z3_REDUX)
+Z3_DE_ROM=$(find_rom "$HASH_Z3_DE" zelda3.de.sfc Z3_DE)
+Z3_FR_ROM=$(find_rom "$HASH_Z3_FR" zelda3.fr.sfc Z3_FR)
+Z3_FRC_ROM=$(find_rom "$HASH_Z3_FRC" zelda3.fr-c.sfc Z3_FRC)
+Z3_ES_ROM=$(find_rom "$HASH_Z3_ES" zelda3.es.sfc Z3_ES)
+Z3_PL_ROM=$(find_rom "$HASH_Z3_PL" zelda3.pl.sfc Z3_PL)
+Z3_PT_ROM=$(find_rom "$HASH_Z3_PT" zelda3.pt.sfc Z3_PT)
+Z3_NL_ROM=$(find_rom "$HASH_Z3_NL" zelda3.nl.sfc Z3_NL)
+Z3_SV_ROM=$(find_rom "$HASH_Z3_SV" zelda3.sv.sfc Z3_SV)
+
+SM_ROM=$(find_rom "$HASH_SM" sm.smc SM)
+SM_REDUX_ROM=$(find_rom "$HASH_SM_REDUX" sm.redux.smc SM_REDUX)
+
+SMW_ROM=$(find_rom "$HASH_SMW" smw.sfc SMW)
+SMAS_ROM=$(find_rom "$HASH_SMAS" smas.sfc SMAS)
+SMB1_ROM=$(find_rom "$HASH_SMB1" smb1.sfc SMB1)
+SMBLL_ROM=$(find_rom "$HASH_SMBLL" smbll.sfc SMBLL)
+
+# ------------------------------------------------------------------ playable
+
+PLAYABLE=
+is_playable() {
+    case $1 in
+        z3|z3-redux) [ -n "$Z3_ROM" ] ;;
+        sm|sm-redux) [ -n "$SM_ROM" ] ;;
+        smw)         [ -n "$SMW_ROM" ] ;;
+        smb1|smbll)  [ -n "$SMW_ROM" ] && { [ -n "$SMB1_ROM" ] || [ -n "$SMAS_ROM" ]; } ;;
+        z3-de)       [ -n "$Z3_ROM" ] && [ -n "$Z3_DE_ROM" ] ;;
+        z3-fr)       [ -n "$Z3_ROM" ] && [ -n "$Z3_FR_ROM" ] ;;
+        z3-fr-c)     [ -n "$Z3_ROM" ] && [ -n "$Z3_FRC_ROM" ] ;;
+        z3-es)       [ -n "$Z3_ROM" ] && [ -n "$Z3_ES_ROM" ] ;;
+        z3-pl)       [ -n "$Z3_ROM" ] && [ -n "$Z3_PL_ROM" ] ;;
+        z3-pt)       [ -n "$Z3_ROM" ] && [ -n "$Z3_PT_ROM" ] ;;
+        z3-nl)       [ -n "$Z3_ROM" ] && [ -n "$Z3_NL_ROM" ] ;;
+        z3-sv)       [ -n "$Z3_ROM" ] && [ -n "$Z3_SV_ROM" ] ;;
+        *)           return 1 ;;
+    esac
+}
+
+while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    is_playable "${entry%%|*}" && PLAYABLE="$PLAYABLE ${entry%%|*}"
+done <<-EOF
+$GAME_TABLE
+EOF
+
+# ------------------------------------------------------------------ patching
+
+# patch_rom <source rom> <ips> <destination>
+patch_rom() {
+    [ -f "$3" ] && return 0
+    say "Patching $(basename "$3") (this only happens once)"
+	"$APPDIR/bin/flips" --apply "$2" "$1" "$3" >/dev/null 2>&1
+	[ -f "$3" ]
+}
+
+# ---------------------------------------------------------------------- gui
+
+gui_choose() {
+	set --
+	while IFS= read -r entry; do
+		[ -n "$entry" ] || continue
+		key=${entry%%|*}
+		title=${entry#*|}
+		if is_playable "$key"; then
+			set -- "$@" "$key" "$title"
+		else
+			set -- "$@" "$key" "$title (Missing Files)"
+		fi
+	done <<-EOF
+	$GAME_TABLE
+	EOF
+
+	if [ "$INSTALL_DESKTOP" = 1 ]; then
+		set -- "$@" desktop "Desktop Shortcuts (Enabled)"
+	else
+		set -- "$@" desktop "Desktop Shortcuts (Disabled)"
+	fi
+
+	zenity --list --title="SNESREV Launcher" --height=600 --width=450 \
+		--column="Cmd" --column="Game" --hide-header "$@" 2>/dev/null
+}
+
+# ------------------------------------------------------------------- launch
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+
+case $cmd in
+	help)
+		show_help
+		exit 0
+		;;
+	desktop)
+		toggle_desktop
+		exit 0
+		;;
+	'')
+		if command -v zenity >/dev/null 2>&1; then
+			cmd=$(gui_choose)
+			[ -n "$cmd" ] || exit 0
+			GUI=1
+		else
+			show_help
+			exit 0
+		fi
+		;;
+esac
+
+[ "$INSTALL_DESKTOP" = 1 ] && sync_desktops
+
+case $cmd in
+	z3|z3-en)
+		zelda3 z3 us
+		;;
+	z3-redux)
+		# either the user has a pre-patched dump or we build one from the
+		# base ROM with the patch that ships in the AppImage
+		if [ -z "$Z3_REDUX_ROM" ]; then
+			patch_rom "$Z3_ROM" "$TOOLS/patches/z3.redux.ips" "$ROM_DIR/zelda3.redux.sfc" || exit 1
+			Z3_REDUX_ROM=$ROM_DIR/zelda3.redux.sfc
+		fi
+		zelda3 z3-redux redux "$Z3_REDUX_ROM"
+		;;
+	z3-de|z3-fr|z3-fr-c|z3-es|z3-pl|z3-pt|z3-nl|z3-sv)
+		lang=${cmd#z3-}
+		rom=
+		case $lang in
+			de)   rom=$Z3_DE_ROM ;;
+			fr)   rom=$Z3_FR_ROM ;;
+			fr-c) rom=$Z3_FRC_ROM ;;
+			es)   rom=$Z3_ES_ROM ;;
+			pl)   rom=$Z3_PL_ROM ;;
+			pt)   rom=$Z3_PT_ROM ;;
+			nl)   rom=$Z3_NL_ROM ;;
+			sv)   rom=$Z3_SV_ROM ;;
+		esac
+		zelda3 "$cmd" "$lang" "$rom"
+		;;
+	sm)
+		super_metroid sm "$SM_ROM"
+		;;
+	sm-redux)
+		if [ -z "$SM_REDUX_ROM" ]; then
+            patch_rom "$SM_ROM" "$TOOLS/patches/sm.redux.ips" "$ROM_DIR/sm.redux.smc" || exit 1
+            SM_REDUX_ROM=$ROM_DIR/sm.redux.smc
+        fi
+        super_metroid sm-redux "$SM_REDUX_ROM"
+        ;;
+    smw)
+        super_mario_world smw "$SMW_ROM" smw.sfc
+        ;;
+    smb1|smbll)
+        if [ -z "${SMB1_ROM:-}" ] || [ -z "${SMBLL_ROM:-}" ]; then
+            smb_roms || exit 1
+            SMB1_ROM=$ROM_DIR/smb1.sfc
+            SMBLL_ROM=$ROM_DIR/smbll.sfc
+        fi
+        if [ "$cmd" = smb1 ]; then
+            super_mario_world smb1 "$SMB1_ROM" smb1.sfc
+        else
+            super_mario_world smbll "$SMBLL_ROM" smbll.sfc
+        fi
+        ;;
+    *)
+        printf "Error: '%s' is not a valid command.\n\n" "$cmd" >&2
+        show_help >&2
+        exit 1
+        ;;
+esac
