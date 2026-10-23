@@ -234,7 +234,6 @@ zelda3_assets() {
 	fi
 
 	mkdir -p "$dest" || { rm -rf "$w"; return 1; }
-sh
 	mv -f "$w/zelda3_assets.dat" "$dest/zelda3_assets.dat" || { rm -rf "$w"; return 1; }
 	rm -rf "$w"
 	return 0
@@ -417,7 +416,7 @@ install_desktop() {
     Terminal=false
     Categories=Game;
     StartupNotify=false
-    EOF
+    	EOF
     chmod +x "$desktop_dir/SRL-$title.desktop"
 }
 
@@ -439,7 +438,7 @@ sync_desktops() {
             fi
         done <<-EOF
         $GAME_TABLE
-        EOF
+        	EOF
     done
 
     # drop shortcuts of games whose files went missing
@@ -453,7 +452,7 @@ sync_desktops() {
                 [ "${entry#*|}" = "$name" ] && found=1
             done <<-EOF
             $GAME_TABLE
-            EOF
+            	EOF
         done
         [ "$found" = 1 ] && continue
         say "Removing obsolete shortcut: $name"
@@ -477,11 +476,6 @@ toggle_desktop() {
     fi
     set_cfg INSTALL_DESKTOP "$INSTALL_DESKTOP"
     say "Desktop shortcuts: $state"
-    if [ "${GUI:-}" = 1 ] && command -v zenity >/dev/null 2>&1; then
-        zenity --info --text="Desktop shortcuts: $state" --timeout=2
-        exec "$0"
-    fi
-}
     if [ "${GUI:-}" = 1 ] && command -v zenity >/dev/null 2>&1; then
         zenity --info --text="Desktop shortcuts: $state" --timeout=2
         exec "$0"
@@ -529,7 +523,7 @@ show_help() {
 
      Files written by the launcher: $DATA_ROOT
     -------------------------------------------------------
-    EOF
+    	EOF
 }
 
 # --------------------------------------------------------------- discovery
@@ -580,8 +574,8 @@ while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     is_playable "${entry%%|*}" && PLAYABLE="$PLAYABLE ${entry%%|*}"
 done <<-EOF
-$GAME_TABLE
-EOF
+$GAME_TABLE	
+	EOF
 
 # ------------------------------------------------------------------ patching
 
