@@ -3,13 +3,14 @@
 set -eu
 
 ARCH=$(uname -m)
-export ARCH
+VERSION=$(cat ~/version)
+export ARCH VERSION
 export OUTPATH=./dist
 export OUTNAME=SnesRev_Launcher-"$ARCH".AppImage
 export ADD_HOOKS="self-updater.hook"
 export UPINFO="gh-releases-zsync|${GITHUB_REPOSITORY%/*}|${GITHUB_REPOSITORY#*/}|latest|*$ARCH.AppImage.zsync"
 export ICON=https://raw.githubusercontent.com/TheRealYasri/snesrev-launcher/2364f51d3d3f9bebd3bde416a33f2e0840181345/snesrev.AppDir/snesrev.png
-export DESKTOP="$PWD"/useful-tools/demo/snesrev-launcher/snesrev.desktop
+export DESKTOP="$PWD/build files/snesrev.desktop"
 export STARTUPWMCLASS=snesrev
 
 # The launcher drives the ports through python, and flips applies the Redux
